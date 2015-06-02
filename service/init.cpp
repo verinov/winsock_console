@@ -19,14 +19,78 @@ struct ChildHandles {
 };
 
 
-void CreateChildProcess(void*);
+HANDLE CreateChildProcess(void*);
+DWORD WINAPI WriteToPipe(void* pHandles);
 DWORD WINAPI ReadFromPipe(void*);
 void ErrorExit(PTSTR);
 
+
+/*
 DWORD WINAPI ChildWatcher(HANDLE hChildProcess) {
     WaitForSingleObject(hChildProcess, INFINITE);
-    ExitProcess(2);
+
+    TerminateProcess(hChildProcess, 23);
+    CloseHandle(hChildProcess);
+    ExitThread(2);
+   // ExitProcess(2);
     // FIXME
+}*/
+
+bool FillHandles(ChildHandles& handles) {
+    SECURITY_ATTRIBUTES saAttr;
+
+    // Set the bInheritHandle flag so pipe handles are inherited. 
+    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+    saAttr.bInheritHandle = TRUE;
+    saAttr.lpSecurityDescriptor = NULL;
+
+    // Create a pipe for the child process's STDOUT.
+    if (!CreatePipe(&handles.OUT_Rd, &handles.OUT_Wr, &saAttr, 0)) {
+        printf("StdoutRd CreatePipe\n");
+        return false;
+    }
+
+    // Ensure the read handle to the pipe for STDOUT is not inherited.
+    if (!SetHandleInformation(handles.OUT_Rd, HANDLE_FLAG_INHERIT, 0)) {
+        printf("Stdout SetHandleInformation\n");
+        return false;
+    }
+
+    // Create a pipe for the child process's STDIN. 
+    if (!CreatePipe(&handles.IN_Rd, &handles.IN_Wr, &saAttr, 0)) {
+        printf("Stdin CreatePipe\n");
+        return false;
+    }
+
+    // Ensure the write handle to the pipe for STDIN is not inherited. 
+    if (!SetHandleInformation(handles.IN_Wr, HANDLE_FLAG_INHERIT, 0)) {
+        printf("Stdin SetHandleInformation\n");
+        return false;
+    }
+
+    return true;
+}
+
+bool CloseHandles(ChildHandles& handles) {
+    if (!CloseHandle(handles.IN_Wr)) {
+        printf("IN_Wr CloseHandle");
+        return false;
+    }
+    if (!CloseHandle(handles.IN_Rd)) {
+        printf("IN_Rd CloseHandle");
+        return false;
+    }
+    if (!CloseHandle(handles.OUT_Wr)) {
+        printf("OUT_Wr CloseHandle");
+        return false;
+    }
+    if (!CloseHandle(handles.OUT_Rd)) {
+        printf("OUT_Rd CloseHandle");
+        return false;
+    }
+
+    closesocket(handles.socket);
+    return true;
 }
 
 
@@ -34,101 +98,61 @@ DWORD WINAPI Init(void* pSocket)
 {
     ChildHandles chHandles;
     chHandles.socket = *(SOCKET*)pSocket;
-    
     delete pSocket;
 
-    SECURITY_ATTRIBUTES saAttr;
+    if (!FillHandles(chHandles)) {
+        goto exit2;
+    }
 
-    char recvbuf[BUFSIZE];
-    int recvbuflen = BUFSIZE;
-    int iResult;
 
     printf("\n->Start of parent execution.\n");
 
-    // Set the bInheritHandle flag so pipe handles are inherited. 
-
-    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
-    saAttr.bInheritHandle = TRUE;
-    saAttr.lpSecurityDescriptor = NULL;
-
-    // Create a pipe for the child process's STDOUT.
-    
-    if (!CreatePipe(&chHandles.OUT_Rd, &chHandles.OUT_Wr, &saAttr, 0))
-        ErrorExit(TEXT("StdoutRd CreatePipe"));
-
-    // Ensure the read handle to the pipe for STDOUT is not inherited.
-
-    if (!SetHandleInformation(chHandles.OUT_Rd, HANDLE_FLAG_INHERIT, 0))
-        ErrorExit(TEXT("Stdout SetHandleInformation"));
-
-    // Create a pipe for the child process's STDIN. 
-
-    if (!CreatePipe(&chHandles.IN_Rd, &chHandles.IN_Wr, &saAttr, 0))
-        ErrorExit(TEXT("Stdin CreatePipe"));
-
-    // Ensure the write handle to the pipe for STDIN is not inherited. 
-
-    if (!SetHandleInformation(chHandles.IN_Wr, HANDLE_FLAG_INHERIT, 0))
-        ErrorExit(TEXT("Stdin SetHandleInformation"));
-
     // Create the child process with console thread and watcher thread.
     // stdin and stdout are redirected to corresponding child pipes.
-    CreateChildProcess(&chHandles);
+    HANDLE hCmdProcess = CreateChildProcess(&chHandles);
+    if (!hCmdProcess) {
+        goto exit3;
+    }
 
+    // Create thread for ReadFromPipe
+    HANDLE hOutputThread = CreateThread(NULL, 0, ReadFromPipe, &chHandles, 0, NULL);
 
-    // Create thread for ReadFromPipe HERE
-    HANDLE hThread = CreateThread(NULL, 0, ReadFromPipe, &chHandles, 0, NULL);
-
-    if (NULL == hThread) {// thread was not created,  TODO checking*/
-        // TODO clean everything up
-
+    if (NULL == hOutputThread) {
+        goto exit4;
     }
     
+    HANDLE hInputThread = CreateThread(NULL, 0, WriteToPipe, &chHandles, 0, NULL);
 
-    // Write to the pipe that is the standard input for a child process. 
-    // Data is written to the pipe's buffers, so it is not necessary to wait
-    // until the child process is running before writing data.
+    if (NULL == hInputThread) {
+        goto exit5;
+    }
 
-    DWORD dwWritten;
-    BOOL bSuccess = FALSE;
-    HANDLE hParentStdIn = GetStdHandle(STD_INPUT_HANDLE); // HERE
+    HANDLE handlesToWait[] = { hCmdProcess, hOutputThread, hInputThread };
 
-    do {
-        iResult = recv(chHandles.socket, recvbuf, recvbuflen, 0);
+    WaitForMultipleObjects(3, handlesToWait, false, INFINITE);
 
-        printf("Receive socket: %u\n", socket);
+    TerminateProcess(hCmdProcess, 0);
+    TerminateThread(hOutputThread, 0);
+    TerminateThread(hInputThread, 0);
 
-        if (iResult > 0) {
-            printf("Bytes received: %d\n", iResult);
+    if (!CloseHandles(chHandles)) {
+        goto exit2;
+    }
 
-            bSuccess = WriteFile(chHandles.IN_Wr, recvbuf, iResult, &dwWritten, NULL);
-            if (!bSuccess) break;
-        }
-        else if (iResult == 0)
-            printf("Connection closing...\n");
-        else  {
-            printf("recv failed with error: %d\n", WSAGetLastError());
-            closesocket(chHandles.socket);
-            WSACleanup();
-            ExitThread(1);
-            return 1;
-        }
-    } while (iResult > 0);
-
-    // Close the pipe handle so the child process stops reading. 
-
-    if (!CloseHandle(chHandles.IN_Wr))
-        ErrorExit(TEXT("StdInWr CloseHandle"));
-
-
-    // The remaining open handles are cleaned up when this process terminates. 
-    // To avoid resource leaks in a larger application, close handles explicitly. 
-
-    ExitThread(0);
     return 0;
+
+exit5:
+    TerminateThread(hOutputThread, 25);
+exit4:
+    TerminateProcess(hCmdProcess, 24);
+exit3:
+    CloseHandles(chHandles);
+exit2:
+    WSACleanup();
+    return 1;
 }
 
-void CreateChildProcess(void* pHandles)
+HANDLE CreateChildProcess(void* pHandles)
 // Create a child process that uses the previously created pipes for STDIN and STDOUT.
 {
     ChildHandles handles = *(ChildHandles*)pHandles;
@@ -166,18 +190,51 @@ void CreateChildProcess(void* pHandles)
         &piProcInfo);  // receives PROCESS_INFORMATION 
 
     // If an error occurs, exit the application. 
-    if (!bSuccess)
-        ErrorExit(TEXT("CreateProcess"));
-    else
-    {
-        // Close handles to the child process and its primary thread.
-        // Some applications might keep these handles to monitor the status
-        // of the child process, for example. 
-
-        CreateThread(NULL, 0, ChildWatcher, piProcInfo.hProcess, 0, NULL);
-       // CloseHandle(piProcInfo.hProcess);
-        CloseHandle(piProcInfo.hThread);
+    if (!bSuccess) {
+        printf("CreateProcess\n");
+        return 0;
     }
+    
+    // Close handles to the child process and its primary thread.
+    // Some applications might keep these handles to monitor the status
+    // of the child process, for example. 
+
+    //CreateThread(NULL, 0, ChildWatcher, piProcInfo.hProcess, 0, NULL);
+   // CloseHandle(piProcInfo.hProcess);
+    CloseHandle(piProcInfo.hThread);
+
+    return piProcInfo.hProcess;
+}
+
+DWORD WINAPI WriteToPipe(void* pHandles) {
+    ChildHandles handles = *(ChildHandles*)pHandles;
+
+    char recvbuf[BUFSIZE];
+    int recvbuflen = BUFSIZE;
+    int iResult;
+
+    DWORD dwWritten;
+    BOOL bSuccess = FALSE;
+
+    do {
+        iResult = recv(handles.socket, recvbuf, recvbuflen, 0);
+        printf("Receive socket: %u\n", socket);
+
+        if (iResult > 0) {
+            printf("Bytes received: %d\n", iResult);
+
+            bSuccess = WriteFile(handles.IN_Wr, recvbuf, iResult, &dwWritten, NULL);
+            if (!bSuccess) break;
+        }
+        else if (iResult == 0)
+            printf("Connection closing...\n");
+        else  {
+            printf("recv failed with error: %d\n", WSAGetLastError());
+            return 1;
+        }
+    } while (iResult > 0);
+
+    return 0;
 }
 
 DWORD WINAPI ReadFromPipe(void* pHandles)
@@ -205,7 +262,6 @@ DWORD WINAPI ReadFromPipe(void* pHandles)
         iResult = send(handles.socket, chBuf, dwRead, 0);
         if (iResult == SOCKET_ERROR) {
             printf("send failed with error: %d\n", WSAGetLastError());
-            closesocket(handles.socket);
             WSACleanup();
             return 1;
         }
@@ -245,6 +301,6 @@ void ErrorExit(PTSTR lpszFunction)
 
     LocalFree(lpMsgBuf);
     LocalFree(lpDisplayBuf);
-    ExitProcess(1);
+   // ExitProcess(1);
 }
 

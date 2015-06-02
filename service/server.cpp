@@ -44,8 +44,7 @@ int Server(void) {
     ListenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (ListenSocket == INVALID_SOCKET) {
         wprintf(L"socket function failed with error: %ld\n", WSAGetLastError());
-        WSACleanup();
-        return 1;
+        goto cleanup2;
     }
     //----------------------
     // The sockaddr_in structure specifies the address family,
@@ -57,11 +56,7 @@ int Server(void) {
     iResult = bind(ListenSocket, (SOCKADDR *)& service, sizeof(service));
     if (iResult == SOCKET_ERROR) {
         wprintf(L"bind function failed with error %d\n", WSAGetLastError());
-        iResult = closesocket(ListenSocket);
-        if (iResult == SOCKET_ERROR)
-            wprintf(L"closesocket function failed with error %d\n", WSAGetLastError());
-        WSACleanup();
-        return 1;
+        goto cleanup3;
     }
 
     printf("TCP listening socket set up\n");
@@ -69,9 +64,7 @@ int Server(void) {
     iResult = listen(ListenSocket, SOMAXCONN);
     if (iResult == SOCKET_ERROR) {
         printf("listen failed with error: %d\n", WSAGetLastError());
-        closesocket(ListenSocket);
-        WSACleanup();
-        return 1;
+        goto cleanup3;
     }
     printf("listening\n\n");
 
@@ -80,9 +73,7 @@ int Server(void) {
         ClientSocket = accept(ListenSocket, NULL, NULL);
         if (ClientSocket == INVALID_SOCKET) {
             printf("accept failed with error: %d\n", WSAGetLastError());
-            closesocket(ListenSocket);
-            WSACleanup();
-            return 1;
+            goto cleanup3;
         }
 
         // start independent console and corresponding threads
@@ -90,16 +81,19 @@ int Server(void) {
         SOCKET * pSocket = new SOCKET(ClientSocket);
 
         HANDLE hThread = CreateThread(NULL, 0, Init, pSocket, 0, NULL);
-        if (NULL == hThread) {// thread was not created,  TODO checking*/
-            // TODO clean everything up
+        if (NULL == hThread) {
             delete pSocket;
-            closesocket(ListenSocket);
-            WSACleanup();
-            return 1;
+            goto cleanup3;
         }
         
         printf("client socket accepted\n");
     }
     return 0;
+
+cleanup3:
+    closesocket(ListenSocket);
+cleanup2:
+    WSACleanup();
+    return 1;
 }
 
