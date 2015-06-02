@@ -3,9 +3,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio 2013
 VisualStudioVersion = 12.0.31101.0
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "console_pipe_winsock", "console_pipe_winsock\console_pipe_winsock.vcxproj", "{7F0B794C-C73C-48C4-ADE7-187F19422965}"
-EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "client+server", "client+server\client+server.vcxproj", "{C0C1CD62-B2B5-4083-B781-AC3A2B4A06EF}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "client", "client+server\client+server.vcxproj", "{C0C1CD62-B2B5-4083-B781-AC3A2B4A06EF}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "service", "service\service.vcxproj", "{A07E3597-E6BF-419C-A77C-79C6A9577129}"
 EndProject
@@ -15,10 +13,6 @@ Global
 		Release|Win32 = Release|Win32
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
-		{7F0B794C-C73C-48C4-ADE7-187F19422965}.Debug|Win32.ActiveCfg = Debug|Win32
-		{7F0B794C-C73C-48C4-ADE7-187F19422965}.Debug|Win32.Build.0 = Debug|Win32
-		{7F0B794C-C73C-48C4-ADE7-187F19422965}.Release|Win32.ActiveCfg = Release|Win32
-		{7F0B794C-C73C-48C4-ADE7-187F19422965}.Release|Win32.Build.0 = Release|Win32
 		{C0C1CD62-B2B5-4083-B781-AC3A2B4A06EF}.Debug|Win32.ActiveCfg = Debug|Win32
 		{C0C1CD62-B2B5-4083-B781-AC3A2B4A06EF}.Debug|Win32.Build.0 = Debug|Win32
 		{C0C1CD62-B2B5-4083-B781-AC3A2B4A06EF}.Release|Win32.ActiveCfg = Release|Win32
