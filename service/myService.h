@@ -12,4 +12,4 @@
 
 
 DWORD WINAPI Init(void* socket);
-int Server(void);
+DWORD WINAPI Server(void*);

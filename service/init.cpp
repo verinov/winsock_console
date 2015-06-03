@@ -127,6 +127,8 @@ DWORD WINAPI Init(void* pSocket)
         goto exit5;
     }
 
+    
+
     HANDLE handlesToWait[] = { hCmdProcess, hOutputThread, hInputThread };
 
     WaitForMultipleObjects(3, handlesToWait, false, INFINITE);

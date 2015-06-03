@@ -18,7 +18,7 @@
 // Need to link with Ws2_32.lib
 #pragma comment (lib, "Ws2_32.lib")
 
-int Server(void) {
+DWORD WINAPI Server(void*) {
     WSADATA wsaData;
     int iResult;
 
