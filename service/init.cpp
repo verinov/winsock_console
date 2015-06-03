@@ -24,18 +24,6 @@ DWORD WINAPI WriteToPipe(void* pHandles);
 DWORD WINAPI ReadFromPipe(void*);
 void ErrorExit(PTSTR);
 
-
-/*
-DWORD WINAPI ChildWatcher(HANDLE hChildProcess) {
-    WaitForSingleObject(hChildProcess, INFINITE);
-
-    TerminateProcess(hChildProcess, 23);
-    CloseHandle(hChildProcess);
-    ExitThread(2);
-   // ExitProcess(2);
-    // FIXME
-}*/
-
 bool FillHandles(ChildHandles& handles) {
     SECURITY_ATTRIBUTES saAttr;
 
