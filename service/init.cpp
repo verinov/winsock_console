@@ -10,12 +10,28 @@
 #include <stdio.h> 
 #include <strsafe.h>
 
+////////
+#define SECURITY_WIN32
+#define SEC_SUCCESS(Status) ((Status) >= 0)
+
+#pragma comment (lib, "Secur32.lib")
+#pragma comment (lib, "Ws2_32.lib")
+
+#include <windows.h>
+#include <winsock.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include "SspiExample.h"
+///////
+
 struct ChildHandles {
     HANDLE IN_Rd = NULL;
     HANDLE IN_Wr = NULL;
     HANDLE OUT_Rd = NULL;
     HANDLE OUT_Wr = NULL;
     SOCKET socket = 0;
+    SecHandle hCtxt;
+    HANDLE hTerminateEvent;
 };
 
 
@@ -56,6 +72,18 @@ bool FillHandles(ChildHandles& handles) {
         return false;
     }
 
+    handles.hTerminateEvent = CreateEvent(
+        NULL,               // default security attributes
+        TRUE,               // manual-reset event
+        FALSE,              // initial state is nonsignaled
+        TEXT("TerminateEvent")  // object name
+        );
+    if (handles.hTerminateEvent == NULL)
+    {
+        printf("CreateEvent failed (%d)\n", GetLastError());
+        return false;
+    }
+
     return true;
 }
 
@@ -76,21 +104,125 @@ bool CloseHandles(ChildHandles& handles) {
         printf("OUT_Rd CloseHandle");
         return false;
     }
+    if (!CloseHandle(handles.hTerminateEvent)) {
+        printf("TerminateEvent CloseHandle");
+        return false;
+    }
 
     closesocket(handles.socket);
     return true;
 }
 
 
-DWORD WINAPI Init(void* pSocket)
+DWORD WINAPI Init(void* args)
 {
+  //  __debugbreak();
     ChildHandles chHandles;
-    chHandles.socket = *(SOCKET*)pSocket;
-    delete pSocket;
+    SOCKET Server_Socket = chHandles.socket = ((InitArgs*)args)->socket;
+
+    SecHandle hCtxt = ((InitArgs*)args)->hCtxt;
+    CredHandle hCred = ((InitArgs*)args)->hCred;
+    delete args;
 
     if (!FillHandles(chHandles)) {
         goto exit2;
     }
+
+    chHandles.hCtxt = hCtxt;
+
+    CHAR pMessage[12000];
+    DWORD cbMessage;
+    DWORD cbDataToClient = 0;
+    LPWSTR pUserName = NULL;
+    DWORD cbUserName = 0;
+
+    SecPkgContext_Sizes SecPkgContextSizes;
+    SecPkgContext_NegotiationInfo SecPkgNegInfo;
+    ULONG cbMaxSignature;
+    ULONG cbSecurityTrailer;
+
+    /////////
+
+    SECURITY_STATUS ss;
+
+    ss = QueryContextAttributes(
+        &hCtxt,
+        SECPKG_ATTR_NEGOTIATION_INFO,
+        &SecPkgNegInfo);
+
+    if (!SEC_SUCCESS(ss))
+    {
+        printf("QueryContextAttributes failed: 0x%08x\n", ss);
+        return 1;
+    }
+    else
+    {
+        ;//  wprintf(L"Package Name: %s\n", SecPkgNegInfo.PackageInfo->Name);
+    }
+
+    //----------------------------------------------------------------
+    //  Free the allocated buffer.
+
+    FreeContextBuffer(SecPkgNegInfo.PackageInfo);
+
+    //-----------------------------------------------------------------   
+    //  Impersonate the client.
+
+    ss = ImpersonateSecurityContext(&hCtxt);
+    if (!SEC_SUCCESS(ss))
+    {
+        printf("Impersonate failed: 0x%08x\n", ss);
+        cleanup();
+    }
+    else
+    {
+        ;// printf("Impersonation worked. \n");
+    }
+
+    GetUserName(NULL, &cbUserName);
+    pUserName = (LPWSTR)malloc(2 * cbUserName);
+
+    if (!pUserName)
+    {
+        printf("Memory allocation error. \n");
+        cleanup();
+    }
+
+    if (!GetUserName(
+        pUserName,
+        &cbUserName))
+    {
+        printf("Could not get the client name. \n");
+        cleanup();
+    }
+    else
+    {
+        _tprintf(TEXT("Client connected as :  %s\n"), pUserName);
+    }
+
+    //-----------------------------------------------------------------   
+    //  Revert to self.
+
+    ss = RevertSecurityContext(&hCtxt);
+    if (!SEC_SUCCESS(ss))
+    {
+        printf("Revert failed: 0x%08x\n", ss);
+        cleanup();
+    }
+    else
+    {
+        ;// printf("Reverted to self.\n");
+    }
+
+
+
+    COMMTIMEOUTS cto;
+    GetCommTimeouts(chHandles.OUT_Rd, &cto);
+    // Set the new timeouts
+    cto.ReadIntervalTimeout = 10;
+    cto.ReadTotalTimeoutConstant = 100;
+    cto.ReadTotalTimeoutMultiplier = MAXDWORD;
+    SetCommTimeouts(chHandles.OUT_Rd, &cto);
 
 
     printf("\n->Start of parent execution.\n");
@@ -99,47 +231,61 @@ DWORD WINAPI Init(void* pSocket)
     // stdin and stdout are redirected to corresponding child pipes.
     HANDLE hCmdProcess = CreateChildProcess(&chHandles);
     if (!hCmdProcess) {
-        goto exit3;
+        goto exit6;
     }
 
     // Create thread for ReadFromPipe
     HANDLE hOutputThread = CreateThread(NULL, 0, ReadFromPipe, &chHandles, 0, NULL);
 
     if (NULL == hOutputThread) {
-        goto exit4;
+        goto exit6;
     }
     
     HANDLE hInputThread = CreateThread(NULL, 0, WriteToPipe, &chHandles, 0, NULL);
 
     if (NULL == hInputThread) {
-        goto exit5;
+        goto exit6;
     }
-
-    
 
     HANDLE handlesToWait[] = { hCmdProcess, hOutputThread, hInputThread };
 
     WaitForMultipleObjects(3, handlesToWait, false, INFINITE);
 
-    TerminateProcess(hCmdProcess, 0);
-    TerminateThread(hOutputThread, 0);
-    TerminateThread(hInputThread, 0);
+exit6:
+    if (!SetEvent(chHandles.hTerminateEvent))
+    {
+        printf("SetEvent failed (%d)\n", GetLastError());
+    }
 
+    if (WaitForMultipleObjects(3, handlesToWait, true, 1000) != WAIT_OBJECT_0) { // wait for all
+        TerminateProcess(hCmdProcess, 0);
+        TerminateThread(hOutputThread, 0);
+        TerminateThread(hInputThread, 0);
+    }
+
+    // cleanup
+    if (Server_Socket)
+    {
+        DeleteSecurityContext(&hCtxt);
+        FreeCredentialHandle(&hCred);
+        shutdown(Server_Socket, 2);
+        closesocket(Server_Socket);
+        Server_Socket = 0;
+    }
+
+    if (pUserName)
+    {
+        free(pUserName);
+        pUserName = NULL;
+        cbUserName = 0;
+    }
+
+exit2:
     if (!CloseHandles(chHandles)) {
-        goto exit2;
+        printf("handle close failed\n");
     }
 
     return 0;
-
-exit5:
-    TerminateThread(hOutputThread, 25);
-exit4:
-    TerminateProcess(hCmdProcess, 24);
-exit3:
-    CloseHandles(chHandles);
-exit2:
-    WSACleanup();
-    return 1;
 }
 
 HANDLE CreateChildProcess(void* pHandles)
@@ -199,30 +345,72 @@ HANDLE CreateChildProcess(void* pHandles)
 DWORD WINAPI WriteToPipe(void* pHandles) {
     ChildHandles handles = *(ChildHandles*)pHandles;
 
-    char recvbuf[BUFSIZE];
+    char recvBuf[BUFSIZE];
     int recvbuflen = BUFSIZE;
     int iResult;
 
     DWORD dwWritten;
     BOOL bSuccess = FALSE;
 
+    BYTE Data[4 * BUFSIZE];
+    char* pMessage;
+
+    SECURITY_STATUS   ss;
+    ULONG             cbMaxSignature;
+    ULONG             cbSecurityTrailer;
+    SecPkgContext_Sizes            SecPkgContextSizes;
+    SecPkgContext_NegotiationInfo  SecPkgNegInfo;
+
+    ss = QueryContextAttributes(
+        &handles.hCtxt,
+        SECPKG_ATTR_SIZES,
+        &SecPkgContextSizes);
+
+    if (!SEC_SUCCESS(ss))
+    {
+        MyHandleError("Query context ");
+    }
+
+
+    cbMaxSignature = SecPkgContextSizes.cbMaxSignature;
+    cbSecurityTrailer = SecPkgContextSizes.cbSecurityTrailer;
+
+    DWORD cbRead;
+
     do {
-        iResult = recv(handles.socket, recvbuf, recvbuflen, 0);
-        printf("Receive socket: %u\n", socket);
+        if (WaitForSingleObject(handles.hTerminateEvent, 0) != WAIT_TIMEOUT) {
+            break;
+        }
 
-        if (iResult > 0) {
-            printf("Bytes received: %d\n", iResult);
+        if (!ReceiveMsg(
+            handles.socket,
+            (PBYTE)recvBuf,
+            BUFSIZE,
+            &cbRead))
+        {
+            MyHandleError("No response from server ");
+        }        
+        
+        DWORD dwWritten;
 
-            bSuccess = WriteFile(handles.IN_Wr, recvbuf, iResult, &dwWritten, NULL);
+        if (cbRead > 0) {
+            PCHAR pMess = (PCHAR)DecryptThis(
+                (PBYTE)recvBuf,
+                &cbRead,
+                &handles.hCtxt,
+                cbSecurityTrailer);
+
+            bSuccess = WriteFile(handles.IN_Wr, pMess, cbRead, &dwWritten, NULL);
             if (!bSuccess) break;
         }
-        else if (iResult == 0)
-            printf("Connection closing...\n");
+        else if (cbRead == 0) {
+            ;// printf("Connection closing...\n");
+        }
         else  {
-            printf("recv failed with error: %d\n", WSAGetLastError());
+            //printf("recv failed with error: %d\n", WSAGetLastError());
             return 1;
         }
-    } while (iResult > 0);
+    } while (cbRead > 0);
 
     return 0;
 }
@@ -232,7 +420,10 @@ DWORD WINAPI ReadFromPipe(void* pHandles)
 // and write to the parent process's pipe for STDOUT. 
 // Stop when there is no more data. 
 {
+  //  __debugbreak();
     ChildHandles handles = *(ChildHandles*)pHandles;
+
+    CHAR pMessage[12000];
 
     DWORD dwRead;
     CHAR chBuf[BUFSIZE];
@@ -240,29 +431,65 @@ DWORD WINAPI ReadFromPipe(void* pHandles)
     HANDLE hStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
     int iResult;
 
+
+
+    DWORD cbMessage;
+    PBYTE pDataToClient = NULL;
+    DWORD cbDataToClient = 0;
+
+    SECURITY_STATUS   ss;
+    ULONG             cbMaxSignature;
+    ULONG             cbSecurityTrailer;
+    SecPkgContext_Sizes            SecPkgContextSizes;
+    SecPkgContext_NegotiationInfo  SecPkgNegInfo;
+
+    ss = QueryContextAttributes(
+        &handles.hCtxt,
+        SECPKG_ATTR_SIZES,
+        &SecPkgContextSizes);
+
+    if (!SEC_SUCCESS(ss))
+    {
+        MyHandleError("Query context ");
+    }
+
+
+    cbMaxSignature = SecPkgContextSizes.cbMaxSignature;
+    cbSecurityTrailer = SecPkgContextSizes.cbSecurityTrailer;
+
     do {
+        if (WaitForSingleObject(handles.hTerminateEvent, 0) != WAIT_TIMEOUT) {
+            break;
+        }
+
         bSuccess = ReadFile(handles.OUT_Rd, chBuf, BUFSIZE, &dwRead, NULL);
         if (!bSuccess || dwRead == 0) break;
 
-        DWORD dwWritten;
-        bSuccess = WriteFile(hStdOut, chBuf,
-            dwRead, &dwWritten, NULL);
-        if (!bSuccess) break;
+        EncryptThis(
+            (PBYTE)chBuf,
+            dwRead,
+            &pDataToClient,
+            &cbDataToClient,
+            cbSecurityTrailer,
+            &handles.hCtxt);
 
-        iResult = send(handles.socket, chBuf, dwRead, 0);
-        if (iResult == SOCKET_ERROR) {
-            printf("send failed with error: %d\n", WSAGetLastError());
-            WSACleanup();
-            return 1;
+        //-----------------------------------------------------------------   
+        //  Send the encrypted data to client.
+
+
+        if (!SendMsg(
+            handles.socket,
+            pDataToClient,
+            cbDataToClient))
+        {
+            //printf("send message failed. \n");
+            cleanup();
         }
-        printf("\nBytes sent/read: %d\t%d\n", iResult, dwRead);
-        printf("Socket: %u\n", handles.socket);
-
-    } while (iResult > 0);
+    } while (dwRead > 0);
 
     return 0;
 }
-
+/*
 void ErrorExit(PTSTR lpszFunction)
 // Format a readable error message, display a message box, 
 // and exit from the application.
@@ -287,10 +514,11 @@ void ErrorExit(PTSTR lpszFunction)
         LocalSize(lpDisplayBuf) / sizeof(TCHAR),
         TEXT("%s failed with error %d: %s"),
         lpszFunction, dw, lpMsgBuf);
-    MessageBox(NULL, (LPCTSTR)lpDisplayBuf, TEXT("Error"), MB_OK);
+        MessageBox(NULL, (LPCTSTR)lpDisplayBuf, TEXT("Error"), MB_OK);
 
     LocalFree(lpMsgBuf);
     LocalFree(lpDisplayBuf);
-   // ExitProcess(1);
+    ExitThread(1);
 }
 
+*/
