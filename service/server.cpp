@@ -3,25 +3,20 @@
 
 
 #include "stdafx.h"
-
 #include "myService.h"
-
-
-
-
-//-----------------
-
 
 #include <windows.h>
 #include <winsock.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-
+SOCKET g_sockListen = 0;
 static PBYTE g_pInBuf = NULL;
 static PBYTE g_pOutBuf = NULL;
 static DWORD g_cbMaxMessage;
-static TCHAR g_lpPackageName[1024] = TEXT("Negotiate");
+static TCHAR g_lpPackageName[32] = TEXT("Negotiate");
+
+extern HANDLE ghSvcStopEvent;
 
 BOOL AcceptAuthSocket(SOCKET *ServerSocket, CredHandle *hCred, struct _SecHandle *hCtxt);
 
@@ -32,17 +27,10 @@ DWORD WINAPI Server(void*) {
         SECURITY_STATUS ss;
         PSecPkgInfo pkgInfo;
 
-        //-----------------------------------------------------------------   
-        //  Set the default package to negotiate.
-        //strcpy_s((CHAR*)g_lpPackageName, 1024 * sizeof(TCHAR), L"Negotiate");
-       
-        //-----------------------------------------------------------------   
-        //  Initialize the socket interface and the security package.
-
         if (WSAStartup(0x0101, &wsaData))
         {
             printf("Could not initialize winsock: \n");
-            cleanup();
+            goto cleanup;
         }
 
         g_pFuncs = InitSecurityInterface();
@@ -55,7 +43,7 @@ DWORD WINAPI Server(void*) {
         {
             printf("Could not query package info for %s, error 0x%08x\n",
                 g_lpPackageName, ss);
-            cleanup();
+            goto cleanup;
         }
 
         g_cbMaxMessage = pkgInfo->cbMaxToken;
@@ -68,7 +56,52 @@ DWORD WINAPI Server(void*) {
         if (NULL == g_pInBuf || NULL == g_pOutBuf)
         {
             printf("Memory allocation error.\n");
-            cleanup();
+            goto cleanup;
+        }
+
+        // -----------------------------------------------------------
+        // create listen socket
+        SOCKADDR_IN sockIn;
+        g_sockListen = socket(
+            PF_INET,
+            SOCK_STREAM,
+            0);
+
+        if (INVALID_SOCKET == g_sockListen)
+        {
+            printf("Failed to create socket: %u\n", GetLastError());
+            return(FALSE);
+        }
+
+        //-----------------------------------------------------------------   
+        //  Bind to local port.
+
+        sockIn.sin_family = AF_INET;
+        sockIn.sin_addr.s_addr = 0;
+        sockIn.sin_port = htons(DEFAULT_PORT);
+
+        if (SOCKET_ERROR == bind(
+            g_sockListen,
+            (LPSOCKADDR)&sockIn,
+            sizeof(sockIn)))
+        {
+            closesocket(g_sockListen);
+            printf("bind failed: %u\n", GetLastError());
+            return(FALSE);
+        }
+
+        //-----------------------------------------------------------------   
+        //  Listen for client.
+
+        if (SOCKET_ERROR == listen(g_sockListen, 1))
+        {
+            closesocket(g_sockListen);
+            printf("Listen failed: %u\n", GetLastError());
+            return(FALSE);
+        }
+        else
+        {
+            printf("Listening ! \n");
         }
 
         //-----------------------------------------------------------------   
@@ -76,105 +109,63 @@ DWORD WINAPI Server(void*) {
 
         while (TRUE)
         {
+            if (WaitForSingleObject(ghSvcStopEvent, 0) != WAIT_TIMEOUT) {
+                break;
+            }
+
             InitArgs *initArgs = new InitArgs;
+
+            initArgs->socket = accept(
+                g_sockListen,
+                NULL,
+                NULL);
+
+            if (INVALID_SOCKET == initArgs->socket)
+            {
+                printf("accept failed: %u\n", GetLastError());
+                goto skip1;
+            }
 
             //-----------------------------------------------------------------   
             //  Make an authenticated connection with client.
-            if (!AcceptAuthSocket(&initArgs->socket, &initArgs->hCred, &initArgs->hCtxt))
+            if (!DoAuthentication(initArgs->socket, &initArgs->hCred, &initArgs->hCtxt))
             {
                 printf("Could not authenticate the socket.\n");
-                delete initArgs;
-                continue;
+                goto skip2;
             }
 
             HANDLE hThread = CreateThread(NULL, 0, Init, initArgs, 0, NULL);
             if (NULL == hThread) {
-                delete initArgs;
                 printf("create thread failed!\n");
                 return 27;
             }
+            // now Init() thread is responsible for all three handles
 
             printf("client socket accepted\n");
+
+            CloseHandle(hThread);
+
+            continue;
+        skip2:
+            closesocket(initArgs->socket);
+        skip1:
+            delete initArgs;
         }  // end while loop
 
+    cleanup:
+        if (g_pInBuf)
+            free(g_pInBuf);
 
-        // impossible
-        printf("Server ran to completion without error.\n");
-        cleanup();
-        return 0;
+        if (g_pOutBuf)
+            free(g_pOutBuf);
+
+        WSACleanup();
+        exit(0);
 }
 
-
-BOOL AcceptAuthSocket(SOCKET *ServerSocket, CredHandle *hCred, struct _SecHandle *hCtxt)
+BOOL DoAuthentication(SOCKET socket, CredHandle *hCred, struct _SecHandle *hCtxt)
 {
-    SOCKET sockListen;
-    SOCKET sockClient;
-    SOCKADDR_IN sockIn;
-
-    //-----------------------------------------------------------------   
-    //  Create listening socket.
-
-    sockListen = socket(
-        PF_INET,
-        SOCK_STREAM,
-        0);
-
-    if (INVALID_SOCKET == sockListen)
-    {
-        printf("Failed to create socket: %u\n", GetLastError());
-        return(FALSE);
-    }
-
-    //-----------------------------------------------------------------   
-    //  Bind to local port.
-
-    sockIn.sin_family = AF_INET;
-    sockIn.sin_addr.s_addr = 0;
-    sockIn.sin_port = htons(DEFAULT_PORT);
-
-    if (SOCKET_ERROR == bind(
-        sockListen,
-        (LPSOCKADDR)&sockIn,
-        sizeof(sockIn)))
-    {
-        closesocket(sockListen);
-        printf("bind failed: %u\n", GetLastError());
-        return(FALSE);
-    }
-
-    //-----------------------------------------------------------------   
-    //  Listen for client.
-
-    if (SOCKET_ERROR == listen(sockListen, 1))
-    {
-        closesocket(sockListen);
-        printf("Listen failed: %u\n", GetLastError());
-        return(FALSE);
-    }
-    else
-    {
-        printf("Listening ! \n");
-    }
-
-    //-----------------------------------------------------------------   
-    //  Accept client.
-
-    sockClient = accept(
-        sockListen,
-        NULL,
-        NULL);
-
-    if (INVALID_SOCKET == sockClient)
-    {
-        closesocket(sockListen);
-        printf("accept failed: %u\n", GetLastError());
-        return(FALSE);
-    }
-
-    closesocket(sockListen);
-
-    *ServerSocket = sockClient;
-
+    BYTE msg = 1;
     SECURITY_STATUS   ss;
     TimeStamp         Lifetime;
     ss = g_pFuncs->AcquireCredentialsHandle(
@@ -191,24 +182,9 @@ BOOL AcceptAuthSocket(SOCKET *ServerSocket, CredHandle *hCred, struct _SecHandle
     if (!SEC_SUCCESS(ss))
     {
         printf("AcquireCreds failed: 0x%08x\n", ss);
-        return(FALSE);
+        goto fail;
     }
 
-    BYTE msg = DoAuthentication(sockClient, hCred, hCtxt);
-    if (!SendMsg(sockClient, &msg, sizeof(msg)) || !msg) {
-        printf("Authentication failed\n");
-        closesocket(sockClient);
-    }
-    if (!msg) {
-        printf("(because of status send failed)\n");
-    }
-
-    return msg;
-}  // end AcceptAuthSocket  
-
-BOOL DoAuthentication(SOCKET AuthSocket, CredHandle *hCred, struct _SecHandle *hCtxt)
-{
-    
     DWORD cbIn, cbOut;
     BOOL done = FALSE;
     
@@ -219,12 +195,12 @@ BOOL DoAuthentication(SOCKET AuthSocket, CredHandle *hCred, struct _SecHandle *h
     while (!done)
     {
         if (!ReceiveMsg(
-            AuthSocket,
+            socket,
             g_pInBuf,
             g_cbMaxMessage,
             &cbIn))
         {
-            return(FALSE);
+            goto fail;
         }
 
         cbOut = g_cbMaxMessage;
@@ -240,20 +216,30 @@ BOOL DoAuthentication(SOCKET AuthSocket, CredHandle *hCred, struct _SecHandle *h
             hCtxt))
         {
             printf("GenServerContext failed.\n");
-            return(FALSE);
+            goto fail;
         }
         fNewConversation = FALSE;
         if (!SendMsg(
-            AuthSocket,
+            socket,
             g_pOutBuf,
             cbOut))
         {
             printf("Sending message failed.\n");
-            return(FALSE);
+            goto fail;
         }
     }
 
-    return(TRUE);
+    goto success;
+
+fail:
+    msg = 0;
+success:
+
+    if (!SendMsg(socket, &msg, sizeof(msg)) || !msg) {
+        printf("Authentication failed\n");
+        return FALSE;
+    }
+    return TRUE;
 }  // end DoAuthentication
 
 BOOL GenServerContext(
@@ -331,7 +317,6 @@ struct _SecHandle *hCtxt)
 
     *pcbOut = OutSecBuff.cbBuffer;
 
-
   //  printf("Token buffer generated (%lu bytes):\n",
   //      OutSecBuff.cbBuffer);
 
@@ -343,16 +328,3 @@ struct _SecHandle *hCtxt)
     return TRUE;
 
 }  // end GenServerContext
-
-
-void cleanup()
-{
-    if (g_pInBuf)
-        free(g_pInBuf);
-
-    if (g_pOutBuf)
-        free(g_pOutBuf);
-
-    WSACleanup();
-    exit(0);
-}

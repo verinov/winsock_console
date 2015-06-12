@@ -13,6 +13,7 @@
 ////////
 #define SECURITY_WIN32
 #define SEC_SUCCESS(Status) ((Status) >= 0)
+#define cbMaxMessage 12000
 
 #pragma comment (lib, "Secur32.lib")
 #pragma comment (lib, "Ws2_32.lib")
@@ -23,6 +24,8 @@
 #include <stdlib.h>
 #include "SspiExample.h"
 ///////
+
+extern HANDLE ghSvcStopEvent;
 
 struct ChildHandles {
     HANDLE IN_Rd = NULL;
@@ -76,7 +79,7 @@ bool FillHandles(ChildHandles& handles) {
         NULL,               // default security attributes
         TRUE,               // manual-reset event
         FALSE,              // initial state is nonsignaled
-        TEXT("TerminateEvent")  // object name
+        NULL  // object name
         );
     if (handles.hTerminateEvent == NULL)
     {
@@ -88,29 +91,31 @@ bool FillHandles(ChildHandles& handles) {
 }
 
 bool CloseHandles(ChildHandles& handles) {
+    bool result = true;
     if (!CloseHandle(handles.IN_Wr)) {
-        printf("IN_Wr CloseHandle");
-        return false;
+        printf("IN_Wr CloseHandle\n");
+        result = false;
     }
     if (!CloseHandle(handles.IN_Rd)) {
-        printf("IN_Rd CloseHandle");
-        return false;
+        printf("IN_Rd CloseHandle\n");
+        result = false;
     }
     if (!CloseHandle(handles.OUT_Wr)) {
-        printf("OUT_Wr CloseHandle");
-        return false;
+        printf("OUT_Wr CloseHandle\n");
+        result = false;
     }
     if (!CloseHandle(handles.OUT_Rd)) {
-        printf("OUT_Rd CloseHandle");
-        return false;
+        printf("OUT_Rd CloseHandle\n");
+        result = false;
     }
     if (!CloseHandle(handles.hTerminateEvent)) {
-        printf("TerminateEvent CloseHandle");
-        return false;
+        printf("TerminateEvent CloseHandle\n");
+        result = false;
     }
 
+    shutdown(handles.socket, SD_BOTH);
     closesocket(handles.socket);
-    return true;
+    return result;
 }
 
 
@@ -118,19 +123,19 @@ DWORD WINAPI Init(void* args)
 {
   //  __debugbreak();
     ChildHandles chHandles;
-    SOCKET Server_Socket = chHandles.socket = ((InitArgs*)args)->socket;
+    SOCKET socket = chHandles.socket = ((InitArgs*)args)->socket;
 
     SecHandle hCtxt = ((InitArgs*)args)->hCtxt;
     CredHandle hCred = ((InitArgs*)args)->hCred;
     delete args;
 
     if (!FillHandles(chHandles)) {
-        goto exit2;
+        goto exit1;
     }
 
     chHandles.hCtxt = hCtxt;
 
-    CHAR pMessage[12000];
+    CHAR pMessage[cbMaxMessage];
     DWORD cbMessage;
     DWORD cbDataToClient = 0;
     LPWSTR pUserName = NULL;
@@ -153,7 +158,7 @@ DWORD WINAPI Init(void* args)
     if (!SEC_SUCCESS(ss))
     {
         printf("QueryContextAttributes failed: 0x%08x\n", ss);
-        return 1;
+        goto exit1;
     }
     else
     {
@@ -172,7 +177,7 @@ DWORD WINAPI Init(void* args)
     if (!SEC_SUCCESS(ss))
     {
         printf("Impersonate failed: 0x%08x\n", ss);
-        cleanup();
+        goto exit1;
     }
     else
     {
@@ -180,12 +185,13 @@ DWORD WINAPI Init(void* args)
     }
 
     GetUserName(NULL, &cbUserName);
-    pUserName = (LPWSTR)malloc(2 * cbUserName);
+    pUserName = (LPWSTR)malloc(sizeof(TCHAR)*cbUserName);
 
     if (!pUserName)
     {
         printf("Memory allocation error. \n");
-        cleanup();
+        RevertSecurityContext(&hCtxt); // need check for double fail?
+        goto exit1;
     }
 
     if (!GetUserName(
@@ -193,7 +199,8 @@ DWORD WINAPI Init(void* args)
         &cbUserName))
     {
         printf("Could not get the client name. \n");
-        cleanup();
+        RevertSecurityContext(&hCtxt); // need check for double fail?
+        goto exit2;
     }
     else
     {
@@ -207,21 +214,19 @@ DWORD WINAPI Init(void* args)
     if (!SEC_SUCCESS(ss))
     {
         printf("Revert failed: 0x%08x\n", ss);
-        cleanup();
+        goto exit2;
     }
     else
     {
         ;// printf("Reverted to self.\n");
     }
 
-
-
     COMMTIMEOUTS cto;
     GetCommTimeouts(chHandles.OUT_Rd, &cto);
     // Set the new timeouts
     cto.ReadIntervalTimeout = 10;
     cto.ReadTotalTimeoutConstant = 100;
-    cto.ReadTotalTimeoutMultiplier = MAXDWORD;
+    cto.ReadTotalTimeoutMultiplier = 0;
     SetCommTimeouts(chHandles.OUT_Rd, &cto);
 
 
@@ -229,61 +234,59 @@ DWORD WINAPI Init(void* args)
 
     // Create the child process with console thread and watcher thread.
     // stdin and stdout are redirected to corresponding child pipes.
-    HANDLE hCmdProcess = CreateChildProcess(&chHandles);
+    HANDLE hCmdProcess = 0, hOutputThread = 0, hInputThread = 0;
+
+    hCmdProcess = CreateChildProcess(&chHandles);
     if (!hCmdProcess) {
-        goto exit6;
+        goto exit2;
     }
 
-    // Create thread for ReadFromPipe
-    HANDLE hOutputThread = CreateThread(NULL, 0, ReadFromPipe, &chHandles, 0, NULL);
-
-    if (NULL == hOutputThread) {
-        goto exit6;
+    hOutputThread = CreateThread(NULL, 0, ReadFromPipe, &chHandles, 0, NULL);
+    if (!hOutputThread) 
+    {
+        goto exit3;
     }
     
-    HANDLE hInputThread = CreateThread(NULL, 0, WriteToPipe, &chHandles, 0, NULL);
-
-    if (NULL == hInputThread) {
-        goto exit6;
+    hInputThread = CreateThread(NULL, 0, WriteToPipe, &chHandles, 0, NULL);
+    if (!hInputThread) {
+        goto exit3;
     }
 
-    HANDLE handlesToWait[] = { hCmdProcess, hOutputThread, hInputThread };
+    HANDLE handlesToWait[] = { hCmdProcess, hOutputThread, hInputThread, ghSvcStopEvent };
 
-    WaitForMultipleObjects(3, handlesToWait, false, INFINITE);
+    WaitForMultipleObjects(4, handlesToWait, false, INFINITE);
 
-exit6:
+exit3:
     if (!SetEvent(chHandles.hTerminateEvent))
     {
         printf("SetEvent failed (%d)\n", GetLastError());
     }
 
-    if (WaitForMultipleObjects(3, handlesToWait, true, 1000) != WAIT_OBJECT_0) { // wait for all
-        TerminateProcess(hCmdProcess, 0);
-        TerminateThread(hOutputThread, 0);
-        TerminateThread(hInputThread, 0);
+    if (WaitForMultipleObjects(3, handlesToWait, true, INFINITE) != WAIT_OBJECT_0) { // wait for all
+        if (hCmdProcess) {
+            TerminateProcess(hCmdProcess, 0);
+        }
+        if (hOutputThread) {
+            TerminateThread(hOutputThread, 0);
+        }
+        if (hInputThread) {
+            TerminateThread(hInputThread, 0);
+        }
     }
 
-    // cleanup
-    if (Server_Socket)
-    {
-        DeleteSecurityContext(&hCtxt);
-        FreeCredentialHandle(&hCred);
-        shutdown(Server_Socket, 2);
-        closesocket(Server_Socket);
-        Server_Socket = 0;
-    }
-
-    if (pUserName)
-    {
-        free(pUserName);
-        pUserName = NULL;
-        cbUserName = 0;
-    }
+    if (hCmdProcess) CloseHandle(hCmdProcess);
+    if (hOutputThread) CloseHandle(hOutputThread);
+    if (hInputThread) CloseHandle(hInputThread);
 
 exit2:
+    free(pUserName);
+exit1:
     if (!CloseHandles(chHandles)) {
         printf("handle close failed\n");
     }
+
+    DeleteSecurityContext(&hCtxt);
+    FreeCredentialHandle(&hCred);
 
     return 0;
 }
@@ -359,7 +362,6 @@ DWORD WINAPI WriteToPipe(void* pHandles) {
     ULONG             cbMaxSignature;
     ULONG             cbSecurityTrailer;
     SecPkgContext_Sizes            SecPkgContextSizes;
-    SecPkgContext_NegotiationInfo  SecPkgNegInfo;
 
     ss = QueryContextAttributes(
         &handles.hCtxt,
@@ -368,7 +370,8 @@ DWORD WINAPI WriteToPipe(void* pHandles) {
 
     if (!SEC_SUCCESS(ss))
     {
-        MyHandleError("Query context ");
+        printf("Query context\n");
+        return 0;
     }
 
 
@@ -388,7 +391,8 @@ DWORD WINAPI WriteToPipe(void* pHandles) {
             BUFSIZE,
             &cbRead))
         {
-            MyHandleError("No response from server ");
+            printf("No response from client\n");
+            return 0;
         }        
         
         DWORD dwWritten;
@@ -401,18 +405,18 @@ DWORD WINAPI WriteToPipe(void* pHandles) {
                 cbSecurityTrailer);
 
             bSuccess = WriteFile(handles.IN_Wr, pMess, cbRead, &dwWritten, NULL);
-            if (!bSuccess) break;
+            if (!bSuccess) return 0;
         }
         else if (cbRead == 0) {
             ;// printf("Connection closing...\n");
         }
         else  {
             //printf("recv failed with error: %d\n", WSAGetLastError());
-            return 1;
+            return 0;
         }
     } while (cbRead > 0);
 
-    return 0;
+    return 1;
 }
 
 DWORD WINAPI ReadFromPipe(void* pHandles)
@@ -423,15 +427,12 @@ DWORD WINAPI ReadFromPipe(void* pHandles)
   //  __debugbreak();
     ChildHandles handles = *(ChildHandles*)pHandles;
 
-    CHAR pMessage[12000];
+    CHAR pMessage[cbMaxMessage];
 
     DWORD dwRead;
     CHAR chBuf[BUFSIZE];
     BOOL bSuccess = FALSE;
-    HANDLE hStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
     int iResult;
-
-
 
     DWORD cbMessage;
     PBYTE pDataToClient = NULL;
@@ -441,7 +442,6 @@ DWORD WINAPI ReadFromPipe(void* pHandles)
     ULONG             cbMaxSignature;
     ULONG             cbSecurityTrailer;
     SecPkgContext_Sizes            SecPkgContextSizes;
-    SecPkgContext_NegotiationInfo  SecPkgNegInfo;
 
     ss = QueryContextAttributes(
         &handles.hCtxt,
@@ -450,7 +450,21 @@ DWORD WINAPI ReadFromPipe(void* pHandles)
 
     if (!SEC_SUCCESS(ss))
     {
-        MyHandleError("Query context ");
+        printf("Query context\n");
+        return 0;
+    }
+
+
+    COMMTIMEOUTS cto;
+    if (!GetCommTimeouts(handles.OUT_Rd, &cto)) {
+        printf("failed to get timeout, error %d\n", GetLastError());
+    }
+    // Set the new timeouts
+    cto.ReadIntervalTimeout = MAXDWORD;
+    cto.ReadTotalTimeoutConstant = 1;
+    cto.ReadTotalTimeoutMultiplier = MAXDWORD;
+    if (!SetCommTimeouts(handles.OUT_Rd, &cto)) {
+        printf("failed to set timeout, error %d\n", GetLastError());
     }
 
 
@@ -483,42 +497,9 @@ DWORD WINAPI ReadFromPipe(void* pHandles)
             cbDataToClient))
         {
             //printf("send message failed. \n");
-            cleanup();
+            return 0;
         }
     } while (dwRead > 0);
 
-    return 0;
+    return 1;
 }
-/*
-void ErrorExit(PTSTR lpszFunction)
-// Format a readable error message, display a message box, 
-// and exit from the application.
-{
-    LPVOID lpMsgBuf;
-    LPVOID lpDisplayBuf;
-    DWORD dw = GetLastError();
-
-    FormatMessage(
-        FORMAT_MESSAGE_ALLOCATE_BUFFER |
-        FORMAT_MESSAGE_FROM_SYSTEM |
-        FORMAT_MESSAGE_IGNORE_INSERTS,
-        NULL,
-        dw,
-        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-        (LPTSTR)&lpMsgBuf,
-        0, NULL);
-
-    lpDisplayBuf = (LPVOID)LocalAlloc(LMEM_ZEROINIT,
-        (lstrlen((LPCTSTR)lpMsgBuf) + lstrlen((LPCTSTR)lpszFunction) + 40)*sizeof(TCHAR));
-    StringCchPrintf((LPTSTR)lpDisplayBuf,
-        LocalSize(lpDisplayBuf) / sizeof(TCHAR),
-        TEXT("%s failed with error %d: %s"),
-        lpszFunction, dw, lpMsgBuf);
-        MessageBox(NULL, (LPCTSTR)lpDisplayBuf, TEXT("Error"), MB_OK);
-
-    LocalFree(lpMsgBuf);
-    LocalFree(lpDisplayBuf);
-    ExitThread(1);
-}
-
-*/

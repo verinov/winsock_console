@@ -1,7 +1,5 @@
 //  SspiExample.h
 
-
-
 #include <sspi.h>
 #include <windows.h>
 
@@ -9,7 +7,6 @@ BOOL SendMsg(SOCKET s, PBYTE pBuf, DWORD cbBuf);
 BOOL ReceiveMsg(SOCKET s, PBYTE pBuf, DWORD cbBuf, DWORD *pcbRead);
 BOOL SendBytes(SOCKET s, PBYTE pBuf, DWORD cbBuf);
 BOOL ReceiveBytes(SOCKET s, PBYTE pBuf, DWORD cbBuf, DWORD *pcbRead);
-void cleanup();
 
 BOOL GenClientContext(
     BYTE *pIn,
@@ -56,14 +53,6 @@ BYTE ** ppOutput,
 LPDWORD pcbOutput
 );
 
-PBYTE VerifyThis(
-    PBYTE pBuffer,
-    LPDWORD pcbMessage,
-struct _SecHandle *hCtxt,
-    ULONG   cbMaxSignature
-    );
-
-void PrintHexDump(DWORD length, PBYTE buffer);
 
 BOOL ConnectAuthSocket(
     char* ipAddr,
@@ -75,5 +64,3 @@ struct _SecHandle *hcText
 BOOL CloseAuthSocket(SOCKET s);
 
 BOOL DoAuthentication(SOCKET s, CredHandle *hCred, struct _SecHandle *hCtxt);
-
-void MyHandleError(char *s);

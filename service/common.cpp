@@ -1,30 +1,6 @@
 #include "stdafx.h"
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
 
 #include "myService.h"
-
-#include <windows.h>
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <stdlib.h>
-#include <stdio.h>
-
-
-//-----------------
-#define SECURITY_WIN32
-#define SEC_SUCCESS(Status) ((Status) >= 0)
-
-#pragma comment (lib, "Secur32.lib")
-#pragma comment (lib, "Ws2_32.lib")
-
-#include <windows.h>
-#include <winsock.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include "SspiExample.h"
-
 
 BOOL SendMsg(
     SOCKET s,
@@ -137,10 +113,6 @@ struct _SecHandle *hCtxt,
     return pDataBuffer;
 
 }
-
-
-
-
 
 BOOL ReceiveMsg(
     SOCKET s,
@@ -259,14 +231,6 @@ BOOL ReceiveBytes(
     return TRUE;
 }  // end ReceivesBytes
 
-void MyHandleError(char *s)
-{
-
-    printf("%s error. Exiting.\n", s);
-    exit(EXIT_FAILURE);
-}
-
-
 BOOL EncryptThis(
     PBYTE pMessage,
     ULONG cbMessage,
@@ -352,60 +316,3 @@ struct _SecHandle *hCtxt)
     return TRUE;
 
 }  // end EncryptThis
-
-
-void PrintHexDump(
-    DWORD length,
-    PBYTE buffer)
-{
-    DWORD i, count, index;
-    CHAR rgbDigits[] = "0123456789abcdef";
-    CHAR rgbLine[100];
-    char cbLine;
-
-    for (index = 0; length;
-        length -= count, buffer += count, index += count)
-    {
-        count = (length > 16) ? 16 : length;
-
-        sprintf_s(rgbLine, 100, "%4.4x  ", index);
-        cbLine = 6;
-
-        for (i = 0; i<count; i++)
-        {
-            rgbLine[cbLine++] = rgbDigits[buffer[i] >> 4];
-            rgbLine[cbLine++] = rgbDigits[buffer[i] & 0x0f];
-            if (i == 7)
-            {
-                rgbLine[cbLine++] = ':';
-            }
-            else
-            {
-                rgbLine[cbLine++] = ' ';
-            }
-        }
-        for (; i < 16; i++)
-        {
-            rgbLine[cbLine++] = ' ';
-            rgbLine[cbLine++] = ' ';
-            rgbLine[cbLine++] = ' ';
-        }
-
-        rgbLine[cbLine++] = ' ';
-
-        for (i = 0; i < count; i++)
-        {
-            if (buffer[i] < 32 || buffer[i] > 126)
-            {
-                rgbLine[cbLine++] = '.';
-            }
-            else
-            {
-                rgbLine[cbLine++] = buffer[i];
-            }
-        }
-
-        rgbLine[cbLine++] = 0;
-        printf("%s\n", rgbLine);
-    }
-}
